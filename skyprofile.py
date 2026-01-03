@@ -55,6 +55,9 @@ import shutil
 import sys
 import json
 import gzip
+import hashlib
+import tempfile
+import shutil
 import io
 import math
 import time
@@ -75,6 +78,8 @@ from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.chart.label import DataLabelList
 from openpyxl.chart.axis import ChartLines
+from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.drawing.fill import PatternFillProperties
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Alignment
 from openpyxl.drawing.image import Image as XLImage
@@ -154,7 +159,19 @@ ISO_COUNTRY_FALLBACK = {
     "BO": "Bolivia",
     "FO": "Faroe Islands",
     "SR": "Suriname",
+    "TM": "Turkmenistan",
 }
+
+# Complete ISO 3166-1 alpha-2 fallback (parsed at import to keep code compact)
+_ISO_ALL_CODES = """
+AF:Afghanistan,AX:Aland Islands,AL:Albania,DZ:Algeria,AS:American Samoa,AD:Andorra,AO:Angola,AI:Anguilla,AQ:Antarctica,AG:Antigua and Barbuda,AR:Argentina,AM:Armenia,AW:Aruba,AU:Australia,AT:Austria,AZ:Azerbaijan,BS:Bahamas,BH:Bahrain,BD:Bangladesh,BB:Barbados,BY:Belarus,BE:Belgium,BZ:Belize,BJ:Benin,BM:Bermuda,BT:Bhutan,BO:Bolivia,BA:Bosnia and Herzegovina,BW:Botswana,BV:Bouvet Island,BR:Brazil,IO:British Indian Ocean Territory,BN:Brunei Darussalam,BG:Bulgaria,BF:Burkina Faso,BI:Burundi,KH:Cambodia,CM:Cameroon,CA:Canada,CV:Cape Verde,KY:Cayman Islands,CF:Central African Republic,TD:Chad,CL:Chile,CN:China,CX:Christmas Island,CC:Cocos (Keeling) Islands,CO:Colombia,KM:Comoros,CG:Congo,CD:Congo (DRC),CK:Cook Islands,CR:Costa Rica,CI:Cote d'Ivoire,HR:Croatia,CU:Cuba,CW:Curaçao,CY:Cyprus,CZ:Czech Republic,DK:Denmark,DJ:Djibouti,DM:Dominica,DO:Dominican Republic,EC:Ecuador,EG:Egypt,SV:El Salvador,GQ:Equatorial Guinea,ER:Eritrea,EE:Estonia,ET:Ethiopia,FK:Falkland Islands (Malvinas),FO:Faroe Islands,FJ:Fiji,FI:Finland,FR:France,GF:French Guiana,PF:French Polynesia,TF:French Southern Territories,GA:Gabon,GM:Gambia,GE:Georgia,DE:Germany,GH:Ghana,GI:Gibraltar,GR:Greece,GL:Greenland,GD:Grenada,GP:Guadeloupe,GU:Guam,GT:Guatemala,GG:Guernsey,GN:Guinea,GW:Guinea-Bissau,GY:Guyana,HT:Haiti,HM:Heard Island and McDonald Islands,VA:Holy See (Vatican City State),HN:Honduras,HK:Hong Kong,HU:Hungary,IS:Iceland,IN:India,ID:Indonesia,IR:Iran,IQ:Iraq,IE:Ireland,IM:Isle of Man,IL:Israel,IT:Italy,JM:Jamaica,JP:Japan,JE:Jersey,JO:Jordan,KZ:Kazakhstan,KE:Kenya,KI:Kiribati,KP:Korea (North),KR:Korea (South),KW:Kuwait,KG:Kyrgyzstan,LA:Lao PDR,LV:Latvia,LB:Lebanon,LS:Lesotho,LR:Liberia,LY:Libya,LI:Liechtenstein,LT:Lithuania,LU:Luxembourg,MO:Macao,MK:North Macedonia,MG:Madagascar,MW:Malawi,MY:Malaysia,MV:Maldives,ML:Mali,MT:Malta,MH:Marshall Islands,MQ:Martinique,MR:Mauritania,MU:Mauritius,YT:Mayotte,MX:Mexico,FM:Micronesia,MD:Moldova,MC:Monaco,MN:Mongolia,ME:Montenegro,MS:Montserrat,MA:Morocco,MZ:Mozambique,MM:Myanmar,NA:Namibia,NR:Nauru,NP:Nepal,NL:Netherlands,NC:New Caledonia,NZ:New Zealand,NI:Nicaragua,NE:Niger,NG:Nigeria,NU:Niue,NF:Norfolk Island,MP:Northern Mariana Islands,NO:Norway,OM:Oman,PK:Pakistan,PW:Palau,PS:Palestine,PA:Panama,PG:Papua New Guinea,PY:Paraguay,PE:Peru,PH:Philippines,PN:Pitcairn,PL:Poland,PT:Portugal,PR:Puerto Rico,QA:Qatar,RE:Reunion,RO:Romania,RU:Russian Federation,RW:Rwanda,BL:Saint Barthelemy,SH:Saint Helena,KN:Saint Kitts and Nevis,LC:Saint Lucia,MF:Saint Martin (French part),PM:Saint Pierre and Miquelon,VC:Saint Vincent and Grenadines,WS:Samoa,SM:San Marino,ST:Sao Tome and Principe,SA:Saudi Arabia,SN:Senegal,RS:Serbia,SC:Seychelles,SL:Sierra Leone,SG:Singapore,SX:Sint Maarten (Dutch part),SK:Slovakia,SI:Slovenia,SB:Solomon Islands,SO:Somalia,ZA:South Africa,GS:South Georgia and the South Sandwich Islands,SS:South Sudan,ES:Spain,LK:Sri Lanka,SD:Sudan,SR:Suriname,SJ:Svalbard and Jan Mayen,SZ:Eswatini,SE:Sweden,CH:Switzerland,SY:Syrian Arab Republic,TW:Taiwan, TJ:Tajikistan,TZ:Tanzania,TH:Thailand,TL:Timor-Leste,TG:Togo,TK:Tokelau,TO:Tonga,TT:Trinidad and Tobago,TN:Tunisia,TR:Turkey,TM:Turkmenistan,TC:Turks and Caicos Islands,TV:Tuvalu,UG:Uganda,UA:Ukraine,AE:United Arab Emirates,GB:United Kingdom,US:United States,UM:US Minor Outlying Islands,UY:Uruguay,UZ:Uzbekistan,VU:Vanuatu,VE:Venezuela,VN:Viet Nam,VG:Virgin Islands (British),VI:Virgin Islands (U.S.),WF:Wallis and Futuna,EH:Western Sahara,YE:Yemen,ZM:Zambia,ZW:Zimbabwe
+"""
+_ISO_ALL_DICT = {}
+for part in _ISO_ALL_CODES.strip().split(","):
+    if ":" in part:
+        code, name = part.split(":", 1)
+        _ISO_ALL_DICT[code.strip().upper()] = name.strip()
+ISO_COUNTRY_FALLBACK.update(_ISO_ALL_DICT)
 
 
 def iso_country_name(code: str) -> str:
@@ -177,7 +194,47 @@ def iso_country_name(code: str) -> str:
     # Fallback
     if code_upper in ISO_COUNTRY_FALLBACK:
         return ISO_COUNTRY_FALLBACK[code_upper]
-    return raw
+    return code_upper
+
+
+def _safe_tail_token(val: Optional[str]) -> str:
+    """
+    Build a filesystem-safe token from a registration/tail string.
+    Keeps A-Z, 0-9, dash, underscore; uppercases; strips leading/trailing separators.
+    """
+    if not val:
+        return ""
+    token = "".join(ch for ch in str(val).upper() if ch.isalnum() or ch in ("-", "_"))
+    return token.strip("_-")
+
+
+def _shorten_path(path: str, max_len: int = 240) -> str:
+    """
+    If a path exceeds `max_len`, shorten the filename portion with a hash suffix.
+    Keeps the same directory to avoid surprises; helps on Windows MAX_PATH.
+    """
+    if len(path) <= max_len:
+        return path
+    dir_part, name = os.path.split(path)
+    root, ext = os.path.splitext(name)
+    digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+    root_short = root[: max(10, 60)].rstrip("._-")
+    new_name = f"{root_short}_{digest}{ext}"
+    return os.path.join(dir_part, new_name)
+
+
+def _write_minimal_xlsx(path: str, note: str) -> bool:
+    """Write a minimal XLSX to the given path. Returns True on success."""
+    try:
+        ensure_dir_for_file(path)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "summary"
+        ws["A1"] = note
+        wb.save(path)
+        return os.path.isfile(path)
+    except Exception:
+        return False
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -198,6 +255,31 @@ def resource_path(rel_path: str) -> str:
     # Fallback to resources/ subfolder
     alt = os.path.join(base_path, "resources", os.path.basename(rel_path))
     return alt
+
+
+def parse_batch_targets(csv_path: str) -> List[Dict[str, str]]:
+    """
+    Parse a batch CSV containing ICAO hex and/or tail/reg.
+
+    Accepted columns (case-insensitive): icao_hex, hex, icao, tail_number, tail, registration, reg.
+    Returns a list of dicts with keys: icao_hex, tail.
+    """
+    targets: List[Dict[str, str]] = []
+    with open(csv_path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            lowered = {k.lower().strip(): (v or "").strip().upper() for k, v in row.items() if k}
+            hex_code = lowered.get("icao_hex") or lowered.get("hex") or lowered.get("icao")
+            tail = (
+                lowered.get("tail_number")
+                or lowered.get("tail")
+                or lowered.get("registration")
+                or lowered.get("reg")
+            )
+            if not hex_code and not tail:
+                continue
+            targets.append({"icao_hex": hex_code or "", "tail": tail or ""})
+    return targets
 
 
 # -----------------------------
@@ -1354,6 +1436,10 @@ def _describe_leg_for_kml(
         "arr_time_utc": arr_dt.isoformat() + "Z",
         "duration_min": f"{duration_min:.1f}",
     }
+    if meta.get("hex"):
+        ext["hex"] = meta.get("hex")
+    if meta.get("registration"):
+        ext["tail"] = meta.get("registration")
     if callsign:
         ext["callsign"] = callsign
     for key in ("registration", "type", "type_name", "owner", "manufacturer", "model", "flags"):
@@ -1553,6 +1639,148 @@ def build_kml_routes_3d(
     kml.save(out_path)
 
 
+def build_kml_airport_heatmap(
+    airport_stats: Dict[str, Dict[str, Any]],
+    hex_code: str,
+    meta: Dict[str, Any],
+    out_path: str,
+    max_airports: int = 300,
+) -> None:
+    """
+    KML heatmap of airport visits (arrivals + departures) for the aircraft.
+
+    Points are scaled and colored by visit count. Airports beyond `max_airports`
+    are dropped to keep the KML lean.
+    """
+    ensure_dir_for_file(out_path)
+    kml = simplekml.Kml()
+    root_name = f"SkyProfile {hex_code.upper()} – Airport Heatmap"
+    root = kml.newfolder(name=root_name)
+
+    meta_lines = [f"ICAO: {hex_code.upper()}"]
+    for k in ("registration", "type", "type_name", "owner", "description"):
+        if meta.get(k):
+            meta_lines.append(f"{k.capitalize()}: {meta[k]}")
+    calls_meta = meta.get("callsigns")
+    if calls_meta:
+        meta_lines.append(f"Callsigns: {', '.join(calls_meta)}")
+    root.description = "\n".join(meta_lines)
+
+    ap_list = sorted(
+        airport_stats.values(),
+        key=lambda st: (-st.get("total_visits", 0), st["airport"].get("airport_id", "")),
+    )
+    if max_airports and max_airports > 0:
+        ap_list = ap_list[:max_airports]
+
+    max_visits = max((st.get("total_visits", 0) for st in ap_list), default=0)
+    if max_visits <= 0:
+        root.newpoint(name="No airport visits found", coords=[])
+        kml.save(out_path)
+        return
+
+    def lerp(a: float, b: float, t: float) -> float:
+        return a + (b - a) * t
+
+    def color_for_count(count: int) -> str:
+        """Fixed white icon color (opaque)."""
+        return "ffffffff"
+
+    def scale_for_count(count: int) -> float:
+        # Scale dot size linearly from 1.0 (fewest) up to 3.0 (most).
+        t = min(1.0, max(0.0, count / max_visits))
+        return round(1.0 + 2.0 * t, 2)
+
+    def add_ext(node: Any, key: str, val: str):
+        try:
+            ext = node.extendeddata
+        except Exception:
+            return
+        try:
+            if hasattr(ext, "simplenode"):
+                ext.simplenode(key, val)
+            else:
+                ext.newdata(name=key, value=val)
+        except Exception:
+            try:
+                ext.newdata(name=key, value=val)
+            except Exception:
+                pass
+
+    for st in ap_list:
+        ap = st["airport"]
+        try:
+            lat = float(ap.get("lat"))
+            lon = float(ap.get("lon"))
+        except (TypeError, ValueError):
+            continue
+
+        visits = int(st.get("total_visits", 0))
+        arrs = int(st.get("arr_count", 0))
+        deps = int(st.get("dep_count", 0))
+        name_parts = []
+        codes = [c for c in (ap.get("icao_code"), ap.get("iata_code")) if c]
+        if codes:
+            name_parts.append(" / ".join(codes))
+        if ap.get("name"):
+            name_parts.append(ap["name"])
+        display_name = " – ".join(name_parts) if name_parts else ap.get("airport_id", "Unknown")
+        city = ap.get("city") or ""
+        country = ap.get("iso_country") or ""
+        loc = ", ".join([p for p in [city, country] if p])
+
+        dep_dates = sorted(list(st.get("dep_dates") or []))
+        arr_dates = sorted(list(st.get("arr_dates") or []))
+        all_dates = sorted(set(dep_dates) | set(arr_dates))
+
+        desc_lines = [
+            f"Airport ID: {ap.get('airport_id') or ''}",
+            f"ICAO/IATA: {ap.get('icao_code') or ''} / {ap.get('iata_code') or ''}",
+            f"Name: {ap.get('name') or ''}",
+            f"Location: {loc}" if loc else "Location: (unknown)",
+            f"Total visits: {visits}",
+            f"Arrivals: {arrs}",
+            f"Departures: {deps}",
+            f"Arrival dates: {', '.join(arr_dates) if arr_dates else '—'}",
+            f"Departure dates: {', '.join(dep_dates) if dep_dates else '—'}",
+        ]
+        if meta.get("registration"):
+            desc_lines.append(f"Tail: {meta.get('registration')}")
+        desc_lines.append(f"Hex: {hex_code.upper()}")
+
+        p = root.newpoint(
+            name=f"{display_name} ({visits})",
+            coords=[(lon, lat)],
+        )
+        p.altitudemode = simplekml.AltitudeMode.clamptoground
+        # Circular dot icon; transparent label for a clean heatmap
+        try:
+            p.style.iconstyle.icon.href = "http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png"
+        except Exception:
+            pass
+        p.style.iconstyle.color = color_for_count(visits)
+        p.style.iconstyle.scale = scale_for_count(visits)
+        try:
+            p.style.labelstyle.scale = 0
+        except Exception:
+            pass
+        p.description = "\n".join(desc_lines)
+        add_ext(p, "airport_id", ap.get("airport_id") or "")
+        add_ext(p, "icao_code", ap.get("icao_code") or "")
+        add_ext(p, "iata_code", ap.get("iata_code") or "")
+        add_ext(p, "total_visits", str(visits))
+        add_ext(p, "arrivals", str(arrs))
+        add_ext(p, "departures", str(deps))
+        add_ext(p, "arrival_dates", ",".join(arr_dates))
+        add_ext(p, "departure_dates", ",".join(dep_dates))
+        add_ext(p, "all_dates", ",".join(all_dates))
+        add_ext(p, "hex", hex_code.upper())
+        if meta.get("registration"):
+            add_ext(p, "registration", meta["registration"])
+
+    kml.save(out_path)
+
+
 # -----------------------------
 # CSV / JSON builders
 # -----------------------------
@@ -1563,12 +1791,13 @@ def build_csv(
     hex_code: str,
     meta: Dict[str, Any],
     out_path: str,
+    tail: Optional[str] = None,
 ) -> None:
     """
     Build a consolidated CSV across all segments.
 
     Columns:
-        hex, segment, idx, timestamp_utc, lat, lon, alt_ft, gs, track,
+        hex, tail, segment, idx, timestamp_utc, lat, lon, alt_ft, gs, track,
         plus one column per key in ac_data (flattened).
     """
     ensure_dir_for_file(out_path)
@@ -1583,6 +1812,7 @@ def build_csv(
 
     base_cols = [
         "hex",
+        "tail",
         "segment",
         "idx",
         "timestamp_utc",
@@ -1603,6 +1833,7 @@ def build_csv(
             for idx, hit in enumerate(seg, 1):
                 row = {
                     "hex": hex_code.upper(),
+                    "tail": tail or meta.get("registration") or "",
                     "segment": seg_idx,
                     "idx": idx,
                     "timestamp_utc": dt.datetime.fromtimestamp(
@@ -1626,13 +1857,19 @@ def build_csv(
                 writer.writerow(row)
 
 
-def build_json(raw_blobs: List[Dict[str, Any]], out_path: str) -> None:
+def build_json(raw_blobs: List[Dict[str, Any]], out_path: str, hex_code: Optional[str] = None, tail: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> None:
     """
-    Save a merged collection of the raw ADSBx trace_full JSON blobs (no additional parsing).
+    Save raw ADSBx trace_full blobs with metadata (hex/tail).
     """
     ensure_dir_for_file(out_path)
+    payload = {
+        "hex": (hex_code or "").upper(),
+        "tail": tail or "",
+        "meta": meta or {},
+        "data": raw_blobs,
+    }
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(raw_blobs, f, ensure_ascii=False, indent=2, default=str)
+        json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
 
 
 # -----------------------------
@@ -1903,10 +2140,20 @@ def augment_legs_with_airports(
                     "dep_count": 0,
                     "arr_count": 0,
                     "total_visits": 0,
+                    "dep_dates": set(),
+                    "arr_dates": set(),
                 },
             )
             st[role] += 1
             st["total_visits"] += 1
+            try:
+                day_str = dep_dt.date().isoformat() if role == "dep_count" else arr_dt.date().isoformat()
+                if role == "dep_count":
+                    st["dep_dates"].add(day_str)
+                else:
+                    st["arr_dates"].add(day_str)
+            except Exception:
+                pass
             country_name = iso_country_name(ap.get("iso_country"))
             if country_name:
                 countries_set.add(country_name)
@@ -1929,6 +2176,8 @@ def augment_legs_with_airports(
             {
                 "leg_index": i,
                 "segment": leg.get("segment"),
+                "hex": (leg.get("hex") or "").upper(),
+                "tail": leg.get("tail") or "",
                 "dep_dt": dep_dt,
                 "arr_dt": arr_dt,
                 "duration_min": float(leg.get("duration_min", 0.0)),
@@ -1957,6 +2206,7 @@ def build_summary_excel(
     end_date: dt.date,
     out_path: str,
     airport_db: Any,
+    legs_override: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
     Build an Excel workbook with multiple sheets:
@@ -1979,6 +2229,38 @@ def build_summary_excel(
     def add_chart_safe(ws, chart, anchor: str):
         # Insert chart normally (legacy behavior). If this raises, let it surface so we can fix it.
         ws.add_chart(chart, anchor)
+
+    def set_chart_bg_white(chart_obj):
+        """Force chart and plot backgrounds to white."""
+        try:
+            chart_obj.graphical_properties = GraphicalProperties(solidFill="FFFFFF")
+        except Exception:
+            pass
+        try:
+            chart_obj.plot_area.graphical_properties = GraphicalProperties(solidFill="FFFFFF")
+        except Exception:
+            pass
+        try:
+            chart_obj.plot_area.graphical_properties.noFill = False
+        except Exception:
+            pass
+        try:
+            chart_obj.chart_area = getattr(chart_obj, "chart_area", chart_obj.plot_area)
+            if chart_obj.chart_area is not None:
+                chart_obj.chart_area.graphical_properties = GraphicalProperties(solidFill="FFFFFF")
+        except Exception:
+            pass
+
+    def set_chart_title_suffix(chart_obj, suffix: str):
+        if not suffix:
+            return
+        try:
+            chart_obj.title = f"{chart_obj.title} – {suffix}"
+        except Exception:
+            try:
+                chart_obj.title = suffix
+            except Exception:
+                pass
         # -------- Callsigns seen anywhere in the data (not just legs) ----------
     callsigns_seen_anywhere: Set[str] = set()
     for seg in segments:
@@ -1999,11 +2281,11 @@ def build_summary_excel(
 
 
     # -------- legs from segments ----------
-    legs = extract_legs_for_kml(segments)
+    legs = legs_override if legs_override is not None else extract_legs_for_kml(segments)
 
     # -------- Airport DB normalisation ----------
     # -------- legs from segments ----------
-    legs = extract_legs_for_kml(segments)
+    legs = legs_override if legs_override is not None else extract_legs_for_kml(segments)
 
     airports = normalize_airports_for_matching(airport_db)
     leg_augmented, airport_stats, route_stats, countries_set = augment_legs_with_airports(
@@ -2089,15 +2371,36 @@ def build_summary_excel(
     hour_landings: Dict[int, int] = collections.defaultdict(int)
     callsign_counts: Dict[str, int] = collections.defaultdict(int)
 
+    def airport_display_label(ap: Dict[str, Any]) -> str:
+        # Build a readable airport label from known fields.
+        if not ap:
+            return "Unknown"
+        codes = []
+        if ap.get("icao_code"):
+            codes.append(ap["icao_code"])
+        if ap.get("iata_code"):
+            codes.append(ap["iata_code"])
+        code_part = " / ".join(codes) if codes else ap.get("airport_id") or ""
+        name_part = ap.get("name") or ""
+        city_country = ", ".join([p for p in [ap.get("city"), ap.get("iso_country")] if p])
+        extras = [p for p in [name_part, city_country] if p]
+        if extras:
+            return f"{code_part} - {' | '.join(extras)}" if code_part else " | ".join(extras)
+        return code_part or "Unknown"
+
     # ---------- Flights sheet ----------
     ws_flights = wb.create_sheet("Flights")
     flight_headers = [
+        "hex",
+        "tail",
         "segment",
         "dep_time_utc",
         "arr_time_utc",
         "duration_min",
         "dep_airport_id",
+        "dep_airport_name",
         "arr_airport_id",
+        "arr_airport_name",
         "dep_lat",
         "dep_lon",
         "arr_lat",
@@ -2133,13 +2436,20 @@ def build_summary_excel(
         if callsign:
             callsign_counts[callsign] += 1
 
+        dep_label = airport_display_label(leg.get("dep_airport"))
+        arr_label = airport_display_label(leg.get("arr_airport"))
+
         row = [
+            (leg.get("hex") or hex_code or "").upper(),
+            leg.get("tail") or meta_obj.registration or "",
             leg["segment"],
             dep_dt,
             arr_dt,
             leg["duration_min"],
             leg["dep_airport_id"],
+            dep_label,
             leg["arr_airport_id"],
+            arr_label,
             leg["dep_lat"],
             leg["dep_lon"],
             leg["arr_lat"],
@@ -2166,21 +2476,6 @@ def build_summary_excel(
     for idx, header in enumerate(flight_headers, start=1):
         if header in ts_cols:
             ws_flights.column_dimensions[get_column_letter(idx)].width = 24
-
-    def airport_display_label(ap: Dict[str, Any]) -> str:
-        label = ap["airport_id"]
-        codes = []
-        if ap["icao_code"]:
-            codes.append(ap["icao_code"])
-        if ap["iata_code"]:
-            codes.append(ap["iata_code"])
-        if codes:
-            label = " / ".join(codes) + " – " + (ap["name"] or "")
-        if ap["city"] or ap["iso_country"]:
-            city_country = ", ".join([p for p in [ap["city"], ap["iso_country"]] if p])
-            if city_country:
-                label += " – " + city_country
-        return label
 
     # ---------- Airports (top) sheet ----------
     ws_airports_top = wb.create_sheet("Airports")
@@ -2268,12 +2563,18 @@ def build_summary_excel(
             chart_obj.y_axis.title = y_title
             chart_obj.x_axis.tickLblPos = "low"
             chart_obj.y_axis.number_format = "0"
-            chart_obj.y_axis.majorUnit = 1
+            # Fewer gridlines: every 10 by default, every 100 for large counts
+            major_unit = 10
+            if max_val is not None and max_val > 1000:
+                major_unit = 100
+            chart_obj.y_axis.majorUnit = major_unit
             chart_obj.y_axis.crosses = "min"
             chart_obj.y_axis.majorGridlines = ChartLines()
             if max_val is not None and max_val > 0:
                 chart_obj.y_axis.scaling.min = 0
-                chart_obj.y_axis.scaling.max = max_val + 1
+                remainder = max_val % major_unit
+                pad = (major_unit - remainder) if remainder != 0 else 0
+                chart_obj.y_axis.scaling.max = max_val + pad
         except Exception:
             pass
 
@@ -2309,6 +2610,7 @@ def build_summary_excel(
         chart.width = 32
         add_value_labels(chart)
         apply_chart_color(chart)
+        set_chart_bg_white(chart)
         add_chart_safe(ws_airports_top, chart, "N2")
         ws_airports_top["N20"] = "Airports by total visits"
 
@@ -2365,6 +2667,7 @@ def build_summary_excel(
         chart.width = 44
         add_value_labels(chart)
         apply_chart_color(chart)
+        set_chart_bg_white(chart)
         add_chart_safe(ws_routes_top, chart, "D2")
         ws_routes_top["D22"] = "Routes by leg count"
 
@@ -2391,6 +2694,7 @@ def build_summary_excel(
     chart_dow.width = 26
     add_value_labels(chart_dow)
     apply_chart_color(chart_dow)
+    set_chart_bg_white(chart_dow)
     add_chart_safe(ws_dow, chart_dow, "E2")
     ws_dow["E16"] = "Flights by day of week"
 
@@ -2416,6 +2720,7 @@ def build_summary_excel(
     chart_dom.width = 26
     add_value_labels(chart_dom)
     apply_chart_color(chart_dom)
+    set_chart_bg_white(chart_dom)
     add_chart_safe(ws_dom, chart_dom, "E2")
     ws_dom["E16"] = "Flights by day of month"
 
@@ -2440,11 +2745,10 @@ def build_summary_excel(
     chart_hours.set_categories(cats)
     chart_hours.height = 14
     chart_hours.width = 38
-    # Enable legend for takeoffs/landings colors
+    # Explicit legend labels for series instead of "Series1/Series2"
     from openpyxl.chart.legend import Legend
     chart_hours.legend = Legend()
     try:
-        # Ensure series names are explicit for legend clarity
         if chart_hours.series and len(chart_hours.series) >= 2:
             chart_hours.series[0].title = "Takeoffs"
             chart_hours.series[1].title = "Landings"
@@ -2454,6 +2758,7 @@ def build_summary_excel(
         pass
     add_value_labels(chart_hours)
     apply_chart_color(chart_hours, colors=["1f77b4", "ff7f0e"])
+    set_chart_bg_white(chart_hours)
     add_chart_safe(ws_hours, chart_hours, "E2")
     ws_hours["E20"] = "Takeoffs / landings by hour (UTC)"
 
@@ -2486,6 +2791,7 @@ def build_summary_excel(
         chart_countries.width = 26
         add_value_labels(chart_countries)
         apply_chart_color(chart_countries)
+        set_chart_bg_white(chart_countries)
         add_chart_safe(ws_countries, chart_countries, "D2")
         ws_countries["D18"] = "Visits by country"
 
@@ -2519,6 +2825,7 @@ def build_summary_excel(
         chart.width = 28
         add_value_labels(chart)
         apply_chart_color(chart)
+        set_chart_bg_white(chart)
         add_chart_safe(ws_calls, chart, "E2")
         ws_calls["E20"] = "Legs by callsign"
 
@@ -2628,6 +2935,7 @@ class Worker(QtCore.QThread):
         do_kml_points: bool,
         do_kml_routes: bool,
         do_kml_routes3d: bool,
+        do_kml_heatmap: bool,
         do_csv: bool,
         do_json: bool,
         do_summary: bool,
@@ -2640,6 +2948,7 @@ class Worker(QtCore.QThread):
         self.do_kml_points = do_kml_points
         self.do_kml_routes = do_kml_routes
         self.do_kml_routes3d = do_kml_routes3d
+        self.do_kml_heatmap = do_kml_heatmap
         self.do_csv = do_csv
         self.do_json = do_json
         self.do_summary = do_summary
@@ -2658,6 +2967,7 @@ class Worker(QtCore.QThread):
                 1 if self.do_kml_points else 0,
                 1 if self.do_kml_routes else 0,
                 1 if self.do_kml_routes3d else 0,
+                1 if self.do_kml_heatmap else 0,
                 1 if self.do_csv else 0,
                 1 if self.do_json else 0,
                 1 if self.do_summary else 0,
@@ -2858,9 +3168,13 @@ class Worker(QtCore.QThread):
 
             start_str = self.start_date.strftime("%Y%m%d")
             end_str = self.end_date.strftime("%Y%m%d")
-            base_root = os.path.join(
-                self.out_dir, f"{self.icao_hex.upper()}_{start_str}_{end_str}"
-            )
+            tail_token = _safe_tail_token(meta_obj.registration)
+            base_parts = [self.icao_hex.upper()]
+            if tail_token:
+                base_parts.append(tail_token)
+            base_parts.extend([start_str, end_str])
+            base_root = os.path.abspath(os.path.join(self.out_dir, "_".join(base_parts)))
+            base_root = _shorten_path(base_root, max_len=220)
 
             try:
                 os.makedirs(self.out_dir, exist_ok=True)
@@ -2875,19 +3189,27 @@ class Worker(QtCore.QThread):
 
             # Precompute legs for KML if needed
             legs: List[Dict[str, Any]] = []
-            if self.do_kml_points or self.do_kml_routes or self.do_kml_routes3d or self.do_summary:
+            if (
+                self.do_kml_points
+                or self.do_kml_routes
+                or self.do_kml_routes3d
+                or self.do_kml_heatmap
+                or self.do_summary
+            ):
                 self.log("[kml] Extracting legs…")
                 legs = extract_legs_for_kml(all_segments)
                 self.log(f"[kml] Found {len(legs)} leg(s)")
 
             airports_normalized: List[Dict[str, Any]] = []
             legs_for_kml = legs
+            airport_stats_for_kml: Dict[str, Dict[str, Any]] = {}
             if (
                 legs
                 and (
                     self.do_kml_points
                     or self.do_kml_routes
                     or self.do_kml_routes3d
+                    or self.do_kml_heatmap
                     or self.do_summary
                 )
             ):
@@ -2896,7 +3218,9 @@ class Worker(QtCore.QThread):
                     airport_db_for_kml = load_airport_db_for_summary(ap_root, self.log)
                     airports_normalized = normalize_airports_for_matching(airport_db_for_kml)
                     if airports_normalized:
-                        legs_for_kml, _, _, _ = augment_legs_with_airports(legs, airports_normalized)
+                        legs_for_kml, airport_stats_for_kml, _, _ = augment_legs_with_airports(
+                            legs, airports_normalized
+                        )
                 except Exception as e:
                     self.log(f"[airports] Could not load/augment airports for KML: {e}")
 
@@ -2945,6 +3269,23 @@ class Worker(QtCore.QThread):
                     self.log(f"[error] KML routes 3D: {e}")
                 self._bump_progress()
 
+            # KML: airport heatmap
+            if self.do_kml_heatmap:
+                if self._should_abort():
+                    self.log("[stop] Stopping before KML heatmap as requested.")
+                    self._emit_error_and_stop("Stopped")
+                    return
+                kml_heatmap_path = base_root + "_airport_heatmap.kml"
+                self.log(f"[kml] Building airport heatmap KML at {kml_heatmap_path}…")
+                try:
+                    build_kml_airport_heatmap(
+                        airport_stats_for_kml, self.icao_hex, meta, kml_heatmap_path
+                    )
+                    self.log(f"[kml] Wrote {kml_heatmap_path}")
+                except Exception as e:
+                    self.log(f"[error] KML airport heatmap: {e}")
+                self._bump_progress()
+
             # CSV
             if self.do_csv:
                 if self._should_abort():
@@ -2955,7 +3296,7 @@ class Worker(QtCore.QThread):
                 csv_path = base_root + ".csv"
                 self.log(f"[csv] Building CSV at {csv_path}…")
                 try:
-                    build_csv(all_segments, self.icao_hex, meta, csv_path)
+                    build_csv(all_segments, self.icao_hex, meta, csv_path, tail=meta.get("registration") or "")
                     self.log(f"[csv] Wrote {csv_path}")
                 except Exception as e:
                     self.log(f"[error] CSV: {e}")
@@ -2971,7 +3312,13 @@ class Worker(QtCore.QThread):
                 json_path = base_root + ".json"
                 self.log(f"[json] Building JSON at {json_path}…")
                 try:
-                    build_json(raw_blobs, json_path)
+                    build_json(
+                        raw_blobs,
+                        json_path,
+                        hex_code=self.icao_hex.upper(),
+                        tail=meta.get("registration") or "",
+                        meta=meta,
+                    )
                     self.log(f"[json] Wrote {json_path}")
                 except Exception as e:
                     self.log(f"[error] JSON: {e}")
@@ -2988,18 +3335,37 @@ class Worker(QtCore.QThread):
                     ap_root = os.path.join(RESOURCE_ROOT, "airport_db")
                     airport_db = load_airport_db_for_summary(ap_root, self.log)
                     if airport_db is not None:
-                        summary_path = base_root + "_summary.xlsx"
+                        summary_ok = False
+                        summary_path = os.path.abspath(base_root + "_summary.xlsx")
+                        summary_path = _shorten_path(summary_path, max_len=240)
                         self.log(f"[summary] Building Excel summary at {summary_path}…")
-                        build_summary_excel(
-                            all_segments,
-                            self.icao_hex,
-                            meta_obj,
-                            self.start_date,
-                            self.end_date,
-                            summary_path,
-                            airport_db,
-                        )
-                        self.log(f"[summary] Wrote {summary_path}")
+                        ensure_dir_for_file(summary_path)
+                        try:
+                            build_summary_excel(
+                                all_segments,
+                                self.icao_hex,
+                                meta_obj,
+                                self.start_date,
+                                self.end_date,
+                                summary_path,
+                                airport_db,
+                            )
+                        except Exception as e:
+                            self.log(f"[error] Summary save failed: {e}")
+                        if os.path.isfile(summary_path):
+                            self.log(f"[summary] Wrote {summary_path}")
+                            summary_ok = True
+                        else:
+                            self.log(f"[error] Summary missing at {summary_path}; writing minimal fallback")
+                            note = f"Summary unavailable for {self.icao_hex.upper()}"
+                            if _write_minimal_xlsx(summary_path, note):
+                                self.log(f"[summary] Wrote minimal fallback {summary_path}")
+                                summary_ok = True
+                            else:
+                                self.log(f"[error] Could not write minimal fallback at {summary_path}")
+                        if not summary_ok:
+                            self._emit_error_and_stop("Summary output missing")
+                            return
                     else:
                         self._emit_error_and_stop("Airport database not available.")
                         return
@@ -3156,6 +3522,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(int(1100 * 1.2), 700)
 
         self.worker: Optional[Worker] = None
+        self.last_out_dir: Optional[str] = None
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -3207,20 +3574,40 @@ class MainWindow(QtWidgets.QMainWindow):
         set_field_width(self.tail_edit)
 
         # Export toggles
-        self.kml_points_chk = ToggleCheckBox("Points KML")
+        self.kml_points_chk = ToggleCheckBox("Airports KML")
         self.kml_routes_chk = ToggleCheckBox("Routes KML")
         self.kml_routes3d_chk = ToggleCheckBox("3D Routes KML")
+        self.kml_heatmap_chk = ToggleCheckBox("Airport Heatmap KML")
         self.csv_chk = ToggleCheckBox("Export CSV")
         self.json_chk = ToggleCheckBox("Export JSON")
         self.summary_chk = ToggleCheckBox("Export Excel Summary")
+        self.consolidate_batch_chk = QtWidgets.QCheckBox("Consolidate reports (skip per-aircraft files)")
+        self.consolidate_batch_chk.setStyleSheet(
+            """
+            QCheckBox {
+                background: #303030;
+                color: #f0f0f0;
+                border: 1px solid #888888;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-weight: 600;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+            """
+        )
 
         # Defaults: CSV/JSON/Summary on, KML points+routes on, 3D routes off
         self.kml_points_chk.setChecked(True)
         self.kml_routes_chk.setChecked(True)
         self.kml_routes3d_chk.setChecked(False)
+        self.kml_heatmap_chk.setChecked(False)
         self.csv_chk.setChecked(True)
         self.json_chk.setChecked(True)
         self.summary_chk.setChecked(True)
+        self.consolidate_batch_chk.setChecked(False)
 
         # Output folder row: path + Browse + Open
         out_box = QtWidgets.QHBoxLayout()
@@ -3245,8 +3632,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_btn = QtWidgets.QPushButton("Run Query")
         self.stop_btn = QtWidgets.QPushButton("Stop Query")
+        self.clear_btn = QtWidgets.QPushButton("Clear Fields")
         self.run_btn.clicked.connect(self.run_query)
         self.stop_btn.clicked.connect(self.stop_query)
+        self.clear_btn.clicked.connect(self.clear_fields)
         btn_style = """
             QPushButton {
                 background-color: #555555;
@@ -3269,14 +3658,19 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         self.run_btn.setStyleSheet(btn_style)
         self.stop_btn.setStyleSheet(btn_style)
+        self.clear_btn.setStyleSheet(btn_style)
         for btn in (self.run_btn, self.stop_btn):
             size = btn.sizeHint()
             btn.setFixedSize(int(size.width() * 0.75), int(size.height() * 0.75))
+        # Keep clear button a touch smaller to signal secondary action
+        clr_size = self.clear_btn.sizeHint()
+        self.clear_btn.setFixedSize(int(clr_size.width() * 0.65), int(clr_size.height() * 0.65))
         btns = QtWidgets.QHBoxLayout()
         btns.setSpacing(int(btns.spacing() * 0.75))
         btns.setContentsMargins(0, 0, 0, 0)
         btns.addWidget(self.run_btn)
         btns.addWidget(self.stop_btn)
+        btns.addWidget(self.clear_btn)
         btn_wrap = QtWidgets.QWidget()
         btn_wrap.setLayout(btns)
 
@@ -3302,10 +3696,36 @@ class MainWindow(QtWidgets.QMainWindow):
             """
         )
 
+        # Batch mode inputs
+        self.batch_path = QtWidgets.QLineEdit()
+        self.batch_path.setPlaceholderText("Path to CSV with columns: icao_hex, tail (either is fine)")
+        set_single_line_height(self.batch_path)
+        set_field_width(self.batch_path)
+        self.batch_path.textChanged.connect(self._sync_batch_state)
+        self.batch_browse = QtWidgets.QPushButton("Browse CSV")
+        set_single_line_height(self.batch_browse)
+        self.batch_browse.clicked.connect(self.choose_batch_csv)
+        batch_box = QtWidgets.QHBoxLayout()
+        batch_box.setSpacing(int(batch_box.spacing() * 0.75))
+        batch_box.setContentsMargins(0, 0, 0, 0)
+        batch_box.addWidget(self.batch_path, 1)
+        batch_box.addWidget(self.batch_browse)
+        batch_wrap = QtWidgets.QWidget()
+        batch_wrap.setLayout(batch_box)
+
         form.addRow("Start date:", self.start_date)
         form.addRow("Stop date:", self.end_date)
         form.addRow("ICAO HEX:", self.hex_edit)
         form.addRow("Tail / Reg:", self.tail_edit)
+        form.addRow("Batch CSV:", batch_wrap)
+        # Batch sub-options
+        batch_opts_wrap = QtWidgets.QWidget()
+        batch_opts_layout = QtWidgets.QHBoxLayout()
+        batch_opts_layout.setContentsMargins(20, 0, 0, 0)
+        batch_opts_layout.setSpacing(int(batch_opts_layout.spacing() * 0.5))
+        batch_opts_layout.addWidget(self.consolidate_batch_chk)
+        batch_opts_wrap.setLayout(batch_opts_layout)
+        form.addRow("", batch_opts_wrap)
 
         # KML outputs grouped and slightly indented
         kml_vbox = QtWidgets.QVBoxLayout()
@@ -3313,6 +3733,7 @@ class MainWindow(QtWidgets.QMainWindow):
         kml_vbox.addWidget(self.kml_points_chk)
         kml_vbox.addWidget(self.kml_routes_chk)
         kml_vbox.addWidget(self.kml_routes3d_chk)
+        kml_vbox.addWidget(self.kml_heatmap_chk)
         kml_wrap = QtWidgets.QWidget()
         kml_wrap.setLayout(kml_vbox)
         form.addRow(kml_wrap)
@@ -3389,6 +3810,7 @@ class MainWindow(QtWidgets.QMainWindow):
         vbox.addWidget(splitter)
 
         self._apply_dark_theme()
+        self._toggle_batch_inputs(bool(self.batch_path.text().strip()))
 
     # ---- UI helpers ----
 
@@ -3416,10 +3838,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hex_edit.setText(txt.upper())
         self.hex_edit.blockSignals(False)
 
+    def _sync_batch_state(self, txt: str):
+        # Auto-enable batch mode UI behavior when a CSV path is provided
+        self._toggle_batch_inputs(bool(txt.strip()))
+
+    def _toggle_batch_inputs(self, enabled: bool):
+        # When batch is on, disable single-aircraft inputs to emphasize override
+        self.hex_edit.setDisabled(enabled)
+        self.tail_edit.setDisabled(enabled)
+
     def choose_folder(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose output folder")
         if path:
             self.out_edit.setText(path)
+
+    def choose_batch_csv(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select batch CSV", "", "CSV Files (*.csv)")
+        if path:
+            self.batch_path.setText(path)
+            self._toggle_batch_inputs(True)
 
     def open_folder_in_explorer(self):
         path = self.out_edit.text().strip()
@@ -3460,7 +3897,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress_bar.setFormat("Query Complete")
         self.run_btn.setText("Run Query")
         self.run_btn.setEnabled(True)
-        out_dir = self.out_edit.text().strip()
+        out_dir = self.last_out_dir or self.out_edit.text().strip()
 
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle("Query complete")
@@ -3499,42 +3936,48 @@ class MainWindow(QtWidgets.QMainWindow):
         def is_valid_hex(h: str) -> bool:
             return bool(h) and all(c in "0123456789ABCDEF" for c in h)
 
-        if not is_valid_hex(hex_code):
-            if not tail:
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "Missing identifier",
-                    "Please enter a valid ICAO hex or a tail/registration.",
-                )
-                return
+        batch_path_txt = self.batch_path.text().strip()
+        is_batch_mode = bool(batch_path_txt)
+        if is_batch_mode:
+            self._toggle_batch_inputs(True)
 
-            # Try to resolve hex from ADSBx aircraft DB by registration
-            out_dir = self.out_edit.text().strip() or os.getcwd()
-            acdb_root = os.path.join(RESOURCE_ROOT, "acdb_cache")
-            self.append_log(f"[lookup] Resolving tail {tail} via ADSBx DB…")
-            try:
-                db = load_adsbx_acdb(acdb_root, self.append_log)
-                result = find_acdb_record_by_reg(db, tail)
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "Tail lookup failed",
-                    f"Error loading ADSBx aircraft DB: {e}",
-                )
-                return
+        if not is_batch_mode:
+            if not is_valid_hex(hex_code):
+                if not tail:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Missing identifier",
+                        "Please enter a valid ICAO hex or a tail/registration.",
+                    )
+                    return
 
-            if not result:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "Tail not found",
-                    f"Could not find ICAO hex for tail {tail} in ADSBx DB.",
-                )
-                return
+                # Try to resolve hex from ADSBx aircraft DB by registration
+                out_dir = self.out_edit.text().strip() or os.getcwd()
+                acdb_root = os.path.join(RESOURCE_ROOT, "acdb_cache")
+                self.append_log(f"[lookup] Resolving tail {tail} via ADSBx DB…")
+                try:
+                    db = load_adsbx_acdb(acdb_root, self.append_log)
+                    result = find_acdb_record_by_reg(db, tail)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Tail lookup failed",
+                        f"Error loading ADSBx aircraft DB: {e}",
+                    )
+                    return
 
-            resolved_hex, _rec = result
-            hex_code = resolved_hex.upper()
-            self.hex_edit.setText(hex_code)
-            self.append_log(f"[lookup] Tail {tail} → ICAO hex {hex_code}")
+                if not result:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Tail not found",
+                        f"Could not find ICAO hex for tail {tail} in ADSBx DB.",
+                    )
+                    return
+
+                resolved_hex, _rec = result
+                hex_code = resolved_hex.upper()
+                self.hex_edit.setText(hex_code)
+                self.append_log(f"[lookup] Tail {tail} → ICAO hex {hex_code}")
 
         sdate = self.start_date.date().toPyDate()
         edate = self.end_date.date().toPyDate()
@@ -3551,12 +3994,22 @@ class MainWindow(QtWidgets.QMainWindow):
         do_kml_points = self.kml_points_chk.isChecked()
         do_kml_routes = self.kml_routes_chk.isChecked()
         do_kml_routes3d = self.kml_routes3d_chk.isChecked()
+        do_kml_heatmap = self.kml_heatmap_chk.isChecked()
         do_csv = self.csv_chk.isChecked()
         do_json = self.json_chk.isChecked()
         do_summary = self.summary_chk.isChecked()
+        consolidate_batch = self.consolidate_batch_chk.isChecked()
 
         if not any(
-            [do_kml_points, do_kml_routes, do_kml_routes3d, do_csv, do_json, do_summary]
+            [
+                do_kml_points,
+                do_kml_routes,
+                do_kml_routes3d,
+                do_kml_heatmap,
+                do_csv,
+                do_json,
+                do_summary,
+            ]
         ):
             QtWidgets.QMessageBox.information(
                 self, "Nothing to export", "Enable at least one export format."
@@ -3566,6 +4019,69 @@ class MainWindow(QtWidgets.QMainWindow):
         os.makedirs(out_dir, exist_ok=True)
 
         self.log.clear()
+
+        # Batch mode: parse CSV and spin up BatchWorker
+        if is_batch_mode:
+            batch_csv = batch_path_txt
+            if not batch_csv or not os.path.isfile(batch_csv):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Batch CSV",
+                    "Please choose a valid CSV file with ICAO/Tail entries.",
+                )
+                return
+            try:
+                targets = parse_batch_targets(batch_csv)
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Batch CSV",
+                    f"Could not parse CSV: {e}",
+                )
+                return
+            if not targets:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Batch CSV",
+                    "No valid rows found; expected columns 'icao_hex' or 'tail'.",
+                )
+                return
+
+            batch_out = out_dir
+            os.makedirs(batch_out, exist_ok=True)
+            self.last_out_dir = batch_out
+            self.append_log(
+                f"[run][batch] {len(targets)} targets, {sdate} → {edate}, out={batch_out}"
+            )
+            self.run_btn.setText("Running")
+            self.run_btn.setEnabled(False)
+            self.current_status = "Querying ..."
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("Querying ... (0%)")
+            self.worker = BatchWorker(
+                targets,
+                sdate,
+                edate,
+                do_kml_points,
+                do_kml_routes,
+                do_kml_routes3d,
+                do_kml_heatmap,
+                do_csv,
+                do_json,
+                do_summary,
+                consolidate_batch,
+                batch_out,
+            )
+            self.worker.progress.connect(self.append_log)
+            self.worker.finished_ok.connect(self.on_query_finished_ok)
+            self.worker.finished_err.connect(self.on_query_finished_err)
+            self.worker.status_update.connect(self.on_status_update)
+            self.worker.progress_percent.connect(self.on_progress_percent)
+            self.worker.start()
+            return
+
+        # Single-aircraft path
+        self.last_out_dir = out_dir
         self.append_log(
             f"[run] HEX={hex_code}, {sdate} → {edate}, out={out_dir}"
         )
@@ -3581,6 +4097,7 @@ class MainWindow(QtWidgets.QMainWindow):
             do_kml_points,
             do_kml_routes,
             do_kml_routes3d,
+            do_kml_heatmap,
             do_csv,
             do_json,
             do_summary,
@@ -3602,6 +4119,61 @@ class MainWindow(QtWidgets.QMainWindow):
             self.worker.stop()
         else:
             self.append_log("[idle] No running query.")
+
+    def clear_fields(self):
+        # Do not mutate the form while a worker is running.
+        if self.worker is not None and self.worker.isRunning():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Busy",
+                "A query is running; stop it before clearing the form.",
+            )
+            return
+
+        today = QtCore.QDate.currentDate()
+        self.start_date.setDate(today.addDays(-1))
+        self.end_date.setDate(today)
+        self.hex_edit.clear()
+        self.tail_edit.clear()
+        self.batch_path.clear()
+
+        # Reset checkboxes to defaults
+        self.kml_points_chk.setChecked(True)
+        self.kml_routes_chk.setChecked(True)
+        self.kml_routes3d_chk.setChecked(False)
+        self.kml_heatmap_chk.setChecked(False)
+        self.csv_chk.setChecked(True)
+        self.json_chk.setChecked(True)
+        self.summary_chk.setChecked(True)
+
+        self.out_edit.clear()
+        self.last_out_dir = None
+
+        # Reset status + progress
+        self.current_status = "Idle"
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Idle")
+        self.run_btn.setText("Run Query")
+        self.run_btn.setEnabled(True)
+
+        # Clear log and card
+        self.log.clear()
+        for lbl in (
+            self.label_hex_val,
+            self.label_reg_val,
+            self.label_type_val,
+            self.label_typename_val,
+            self.label_owner_val,
+            self.label_mfr_val,
+            self.label_model_val,
+            self.label_flags_val,
+        ):
+            lbl.setText("—")
+        try:
+            self.photo_label.clear()
+        except Exception:
+            pass
+        self.append_log("[reset] Fields cleared to defaults.")
 
     def on_query_finished_err(self, message: str):
         self.append_log(f"[stopped] {message}")
@@ -3630,6 +4202,581 @@ def main():
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
+
+
+class BatchWorker(QtCore.QThread):
+    progress = QtCore.pyqtSignal(str)
+    status_update = QtCore.pyqtSignal(str)
+    progress_percent = QtCore.pyqtSignal(int)
+    finished_ok = QtCore.pyqtSignal()
+    finished_err = QtCore.pyqtSignal(str)
+
+    def __init__(
+        self,
+        targets: List[Dict[str, str]],
+        start_date: dt.date,
+        end_date: dt.date,
+        do_kml_points: bool,
+        do_kml_routes: bool,
+        do_kml_routes3d: bool,
+        do_kml_heatmap: bool,
+        do_csv: bool,
+        do_json: bool,
+        do_summary: bool,
+        consolidate: bool,
+        out_dir: str,
+    ):
+        super().__init__()
+        self.targets = targets
+        self.start_date = start_date
+        self.end_date = end_date
+        self.do_kml_points = do_kml_points
+        self.do_kml_routes = do_kml_routes
+        self.do_kml_routes3d = do_kml_routes3d
+        self.do_kml_heatmap = do_kml_heatmap
+        self.do_csv = do_csv
+        self.do_json = do_json
+        self.do_summary = do_summary
+        self.consolidate = consolidate
+        self.out_dir = out_dir
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def log(self, msg: str):
+        self.progress.emit(msg)
+
+    def _bump_progress(self, idx: int, total: int):
+        pct = int((idx / max(1, total)) * 100)
+        self.progress_percent.emit(pct)
+
+    def run_single(
+        self, hex_code: str, tail: str, out_dir_override: Optional[str] = None, consolidating: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Run a single-aircraft workflow (no FAA) and return stats.
+        """
+        stats = {"hex": hex_code.upper(), "tail": tail, "legs": 0, "points": 0, "files": {}}
+        meta_obj = AircraftMeta(hex=hex_code)
+        session = requests.Session()
+        # Best-effort metadata (no FAA)
+        try:
+            os_meta = fetch_opensky_metadata(hex_code)
+            for field in ("registration", "manufacturer", "model", "owner", "type"):
+                v = getattr(os_meta, field, None)
+                if v and not getattr(meta_obj, field):
+                    setattr(meta_obj, field, v)
+        except Exception:
+            pass
+        try:
+            photo_url, reg2 = fetch_planespotters_photo_and_reg(hex_code)
+            if photo_url:
+                meta_obj.photo_url = photo_url
+            if reg2 and not meta_obj.registration:
+                meta_obj.registration = reg2
+        except Exception:
+            pass
+        try:
+            acdb_root = os.path.join(RESOURCE_ROOT, "acdb_cache")
+            db = load_adsbx_acdb(acdb_root, self.log)
+            rec = find_acdb_record(db, hex_code)
+            if rec:
+                merge_adsbx_record_into_meta(rec, meta_obj)
+        except Exception:
+            pass
+        apply_type_mapping(meta_obj)
+
+        all_segments: List[List[Dict[str, Any]]] = []
+        raw_blobs: List[Dict[str, Any]] = []
+        per_out_dir = out_dir_override or self.out_dir
+        for day in daterange(self.start_date, self.end_date):
+            if self._stop:
+                return stats
+            cache_root = os.path.join(per_out_dir, "cache")
+            path = fetch_trace_for_day(hex_code, day, session, self.log, cache_root=cache_root)
+            if not path:
+                continue
+            try:
+                with open(path, "rb") as f:
+                    raw = f.read()
+                try:
+                    blob = json.loads(raw)
+                except json.JSONDecodeError:
+                    blob = json.loads(gzip.GzipFile(fileobj=io.BytesIO(raw)).read())
+            except Exception as e:
+                self.log(f"[error] parse {day}: {e}")
+                continue
+            raw_blobs.append(blob)
+            merge_trace_blob_into_meta(blob, meta_obj)
+            apply_type_mapping(meta_obj)
+            segments = extract_hits(blob)
+            if segments:
+                all_segments.extend(segments)
+                total_pts = sum(len(seg) for seg in segments)
+                stats["points"] += total_pts
+
+        if not all_segments:
+            self.log(f"[stats] {hex_code.upper()}: 0 points across all days.")
+            return stats
+
+        total_points = sum(len(seg) for seg in all_segments)
+        self.log(f"[stats] {hex_code.upper()}: {total_points} points across all days.")
+
+        legs: List[Dict[str, Any]] = []
+        if (
+            self.do_kml_points
+            or self.do_kml_routes
+            or self.do_kml_routes3d
+            or self.do_kml_heatmap
+            or self.do_summary
+        ):
+            legs = extract_legs_for_kml(all_segments)
+            stats["legs"] = len(legs)
+
+        # Airport DB
+        ap_root = os.path.join(RESOURCE_ROOT, "airport_db")
+        airport_db = load_airport_db_for_summary(ap_root, self.log)
+        airports_normalized = normalize_airports_for_matching(airport_db)
+        legs_for_kml = legs
+        airport_stats_for_kml: Dict[str, Dict[str, Any]] = {}
+        if airports_normalized and legs:
+            legs_for_kml, airport_stats_for_kml, _, _ = augment_legs_with_airports(
+                legs, airports_normalized
+            )
+
+        start_str = self.start_date.strftime("%Y%m%d")
+        end_str = self.end_date.strftime("%Y%m%d")
+        tail_token = _safe_tail_token(meta_obj.registration) or _safe_tail_token(tail)
+        base_parts = [hex_code.upper()]
+        if tail_token:
+            base_parts.append(tail_token)
+        base_parts.extend([start_str, end_str])
+        # Group outputs per aircraft (hex/tail) so bulk exports stay together
+        folder_parts = [hex_code.upper()]
+        if tail_token:
+            folder_parts.append(tail_token)
+        aircraft_folder = os.path.abspath(os.path.join(per_out_dir, "_".join(folder_parts)))
+        try:
+            os.makedirs(aircraft_folder, exist_ok=True)
+        except Exception:
+            pass
+        base_root = os.path.abspath(os.path.join(aircraft_folder, "_".join(base_parts)))
+        base_root = _shorten_path(base_root, max_len=220)
+
+        meta = {
+            "hex": meta_obj.hex,
+            "registration": meta_obj.registration,
+            "type": meta_obj.type,
+            "type_name": meta_obj.type_name,
+            "owner": meta_obj.owner,
+            "manufacturer": meta_obj.manufacturer,
+            "model": meta_obj.model,
+            "country": meta_obj.country,
+            "flags": meta_obj.flags,
+            "callsigns": meta_obj.callsigns,
+            "description": meta_obj.description,
+            # FAA skipped in batch mode
+        }
+
+        if self.do_kml_points:
+            kml_points_path = base_root + "_points.kml"
+            try:
+                build_kml_points(legs_for_kml, hex_code, meta, kml_points_path)
+                stats["files"]["kml_points"] = kml_points_path
+            except Exception as e:
+                self.log(f"[error] KML points {hex_code}: {e}")
+
+        if self.do_kml_routes:
+            kml_routes_path = base_root + "_routes.kml"
+            try:
+                build_kml_routes_2d(legs_for_kml, hex_code, meta, kml_routes_path)
+                stats["files"]["kml_routes"] = kml_routes_path
+            except Exception as e:
+                self.log(f"[error] KML routes {hex_code}: {e}")
+
+        if self.do_kml_routes3d:
+            kml_routes3d_path = base_root + "_routes3d.kml"
+            try:
+                build_kml_routes_3d(legs_for_kml, hex_code, meta, kml_routes3d_path)
+                stats["files"]["kml_routes3d"] = kml_routes3d_path
+            except Exception as e:
+                self.log(f"[error] KML routes3d {hex_code}: {e}")
+
+        effective_csv = self.do_csv or consolidating
+        effective_json = self.do_json or consolidating
+
+        if self.do_kml_heatmap:
+            kml_heatmap_path = base_root + "_airport_heatmap.kml"
+            try:
+                build_kml_airport_heatmap(
+                    airport_stats_for_kml, hex_code, meta, kml_heatmap_path
+                )
+                stats["files"]["kml_heatmap"] = kml_heatmap_path
+            except Exception as e:
+                self.log(f"[error] KML heatmap {hex_code}: {e}")
+
+        if effective_csv:
+            csv_path = base_root + ".csv"
+            try:
+                build_csv(all_segments, hex_code, meta, csv_path, tail=meta.get("registration") or tail)
+                stats["files"]["csv"] = csv_path
+            except Exception as e:
+                self.log(f"[error] CSV {hex_code}: {e}")
+
+        if effective_json:
+            json_path = base_root + ".json"
+            try:
+                build_json(
+                    raw_blobs,
+                    json_path,
+                    hex_code=hex_code.upper(),
+                    tail=meta_obj.registration or tail,
+                    meta=meta,
+                )
+                stats["files"]["json"] = json_path
+            except Exception as e:
+                self.log(f"[error] JSON {hex_code}: {e}")
+
+        if self.do_summary:
+            summary_filename = "_".join(base_parts + ["summary.xlsx"])
+            summary_path = os.path.abspath(os.path.join(aircraft_folder, summary_filename))
+            summary_path = _shorten_path(summary_path, max_len=240)
+            try:
+                ensure_dir_for_file(summary_path)
+                airport_db = load_airport_db_for_summary(ap_root, self.log)
+                if airport_db is None:
+                    self.log(f"[error] Summary {hex_code}: airport DB unavailable")
+                else:
+                    summary_ok = False
+                    try:
+                        build_summary_excel(
+                            all_segments,
+                            hex_code,
+                            meta_obj,
+                            self.start_date,
+                            self.end_date,
+                            summary_path,
+                            airport_db,
+                        )
+                    except Exception as e:
+                        self.log(f"[error] Summary save failed {hex_code}: {e}")
+                    if os.path.isfile(summary_path):
+                        self.log(f"[summary] Wrote {summary_path}")
+                        summary_ok = True
+                        stats["files"]["summary"] = summary_path
+                    else:
+                        self.log(
+                            f"[error] Summary: missing at {summary_path}; writing minimal fallback"
+                        )
+                        note = f"Summary unavailable for {hex_code.upper()}"
+                        if _write_minimal_xlsx(summary_path, note):
+                            self.log(f"[summary] Wrote minimal fallback {summary_path}")
+                            summary_ok = True
+                        else:
+                            self.log(f"[error] Could not write minimal fallback at {summary_path}")
+                    if not summary_ok:
+                        self.log(f"[error] Summary failed for {hex_code}; skipping further saves for this target.")
+            except Exception as e:
+                self.log(f"[error] Summary {hex_code}: {e}")
+
+        return stats
+
+    def run(self):
+        try:
+            total = len(self.targets)
+            stats_list: List[Dict[str, Any]] = []
+            consolidated: Dict[str, List[str]] = {
+                "kml_points": [],
+                "kml_routes": [],
+                "kml_routes3d": [],
+                "kml_heatmap": [],
+                "csv": [],
+                "json": [],
+                "summary": [],
+            }
+            temp_consolidate_dir = None
+            if self.consolidate:
+                try:
+                    temp_consolidate_dir = tempfile.mkdtemp(dir=self.out_dir, prefix="consolidated_tmp_")
+                except Exception:
+                    temp_consolidate_dir = os.path.join(self.out_dir, "consolidated_tmp")
+                    os.makedirs(temp_consolidate_dir, exist_ok=True)
+            for idx, tgt in enumerate(self.targets, start=1):
+                if self._stop:
+                    self.finished_err.emit("Stopped")
+                    return
+                hex_code = (tgt.get("icao_hex") or "").strip()
+                tail = (tgt.get("tail") or "").strip()
+                if not hex_code and tail:
+                    # try resolve from acdb
+                    try:
+                        acdb_root = os.path.join(RESOURCE_ROOT, "acdb_cache")
+                        db = load_adsbx_acdb(acdb_root, self.log)
+                        res = find_acdb_record_by_reg(db, tail)
+                        if res:
+                            hex_code = res[0]
+                    except Exception:
+                        pass
+                if not hex_code:
+                    self.log(f"[batch] Skipping row {idx}: no ICAO hex")
+                    continue
+                self.status_update.emit(f"Batch {idx}/{total}: {hex_code}")
+                self._bump_progress(idx - 1, total)
+                stats = self.run_single(
+                    hex_code, tail, out_dir_override=temp_consolidate_dir, consolidating=self.consolidate
+                )
+                stats_list.append(stats)
+                self.log(
+                    f"[batch] {hex_code.upper()}: legs={stats.get('legs',0)}, points={stats.get('points',0)}"
+                )
+                if self.consolidate:
+                    files = stats.get("files") or {}
+                    for key, path in files.items():
+                        if key in consolidated and path and os.path.isfile(path):
+                            consolidated[key].append(path)
+                self.status_update.emit(
+                    f"Batch {idx}/{total}: {hex_code} ({stats.get('points',0)} pts)"
+                )
+                self._bump_progress(idx, total)
+
+            if self.consolidate and stats_list:
+                start_str = self.start_date.strftime("%Y%m%d")
+                end_str = self.end_date.strftime("%Y%m%d")
+                base_name = f"consolidated_{len(stats_list)}ACFT_{start_str}_{end_str}"
+                base_root = os.path.abspath(os.path.join(self.out_dir, base_name))
+                ensure_dir_for_file(base_root + ".sentinel")
+
+                def consolidate_csv(paths: List[str], out_path: str):
+                    if not paths:
+                        return
+                    ensure_dir_for_file(out_path)
+                    import csv as _csv
+                    with open(out_path, "w", newline="", encoding="utf-8") as outf:
+                        writer = None
+                        for p in paths:
+                            try:
+                                with open(p, "r", encoding="utf-8") as inf:
+                                    reader = _csv.reader(inf)
+                                    header = next(reader, None)
+                                    if header is None:
+                                        continue
+                                    if writer is None:
+                                        writer = _csv.writer(outf)
+                                        writer.writerow(header)
+                                    for row in reader:
+                                        writer.writerow(row)
+                            except Exception as e:
+                                self.log(f"[error] Consolidate CSV {p}: {e}")
+
+                def consolidate_json(paths: List[str], out_path: str):
+                    if not paths:
+                        return
+                    ensure_dir_for_file(out_path)
+                    merged_payloads = []
+                    for p in paths:
+                        try:
+                            with open(p, "r", encoding="utf-8") as inf:
+                                payload = json.load(inf)
+                                if isinstance(payload, dict) and "data" in payload:
+                                    merged_payloads.append(payload)
+                                else:
+                                    merged_payloads.append(
+                                        {
+                                            "hex": "",
+                                            "tail": "",
+                                            "meta": {},
+                                            "data": payload if isinstance(payload, list) else [payload],
+                                        }
+                                    )
+                        except Exception as e:
+                            self.log(f"[error] Consolidate JSON {p}: {e}")
+                    with open(out_path, "w", encoding="utf-8") as outf:
+                        json.dump(merged_payloads, outf, ensure_ascii=False, indent=2, default=str)
+
+                def consolidate_kml_inline(paths: List[str], out_path: str, title: str):
+                    """
+                    Merge KML placemarks inline (no network links) so the consolidated file is fully offline.
+                    """
+                    if not paths:
+                        return
+                    ensure_dir_for_file(out_path)
+                    import xml.etree.ElementTree as ET
+                    import copy as _copy
+
+                    NS = "http://www.opengis.net/kml/2.2"
+
+                    def q(tag: str) -> str:
+                        return f"{{{NS}}}{tag}"
+
+                    kml_root = ET.Element(q("kml"))
+                    doc_root = ET.SubElement(kml_root, q("Document"))
+                    name_el = ET.SubElement(doc_root, q("name"))
+                    name_el.text = title
+
+                    for p in paths:
+                        try:
+                            tree = ET.parse(p)
+                            root_el = tree.getroot()
+                            doc_el = root_el.find(q("Document"))
+                            if doc_el is None and root_el.tag.endswith("Document"):
+                                doc_el = root_el
+                            if doc_el is None:
+                                continue
+                            folder_el = ET.SubElement(doc_root, q("Folder"))
+                            fname_el = ET.SubElement(folder_el, q("name"))
+                            fname_el.text = os.path.basename(p)
+                            for child in list(doc_el):
+                                folder_el.append(_copy.deepcopy(child))
+                        except Exception as e:
+                            self.log(f"[error] Consolidate KML inline {p}: {e}")
+                    try:
+                        ET.ElementTree(kml_root).write(out_path, encoding="utf-8", xml_declaration=True)
+                    except Exception as e:
+                        self.log(f"[error] Consolidate KML write {out_path}: {e}")
+
+                def consolidate_summary_zip(paths: List[str], out_path: str):
+                    if not paths:
+                        return
+                    ensure_dir_for_file(out_path)
+                    import zipfile
+                    try:
+                        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                            for p in paths:
+                                try:
+                                    zf.write(p, arcname=os.path.basename(p))
+                                except Exception as e:
+                                    self.log(f"[error] Zip summary {p}: {e}")
+                        self.log(f"[summary] Consolidated summaries zipped to {out_path}")
+                    except Exception as e:
+                        self.log(f"[error] Consolidate summary zip: {e}")
+
+                def consolidate_summary_excel_from_json(paths: List[str], out_path: str):
+                    """
+                    Build a consolidated summary workbook (full tabs + charts) from all batch JSON files.
+                    """
+                    if not paths:
+                        return
+                    all_segments: List[List[Dict[str, Any]]] = []
+                    all_legs: List[Dict[str, Any]] = []
+                    for p in paths:
+                        try:
+                            with open(p, "r", encoding="utf-8") as f:
+                                payload = json.load(f)
+                            payloads = []
+                            if isinstance(payload, list):
+                                payloads = payload
+                            elif isinstance(payload, dict):
+                                payloads = [payload]
+                            for item in payloads:
+                                data_blobs = item.get("data") if isinstance(item, dict) else None
+                                payload_hex = (item.get("hex") or "").upper() if isinstance(item, dict) else ""
+                                payload_tail = item.get("tail") if isinstance(item, dict) else ""
+                                if not isinstance(data_blobs, list):
+                                    continue
+                                for blob in data_blobs:
+                                    try:
+                                        segs = extract_hits(blob)
+                                        if segs:
+                                            all_segments.extend(segs)
+                                            legs = extract_legs_for_kml(segs)
+                                            for leg in legs:
+                                                leg["hex"] = payload_hex
+                                                leg["tail"] = payload_tail
+                                            all_legs.extend(legs)
+                                    except Exception as e:
+                                        self.log(f"[error] Consolidate summary load {p}: {e}")
+                        except Exception as e:
+                            self.log(f"[error] Consolidate summary read {p}: {e}")
+                    if not all_segments and not all_legs:
+                        self.log("[summary] Consolidated summary skipped: no segments gathered")
+                        return
+
+                    meta_obj = AircraftMeta(
+                        hex="consolidated",
+                        registration="CONSOLIDATED",
+                        owner="Batch",
+                        description=f"{len(paths)} aircraft batch",
+                    )
+                    try:
+                        ap_root = os.path.join(RESOURCE_ROOT, "airport_db")
+                        airport_db = load_airport_db_for_summary(ap_root, self.log)
+                        if airport_db is None:
+                            self.log("[summary] Consolidated summary skipped: airport DB unavailable")
+                            return
+                        ensure_dir_for_file(out_path)
+                        build_summary_excel(
+                            all_segments if all_segments else [[]],
+                            "CONSOLIDATED",
+                            meta_obj,
+                            self.start_date,
+                            self.end_date,
+                            out_path,
+                            airport_db,
+                            legs_override=all_legs if all_legs else None,
+                        )
+                        if os.path.isfile(out_path):
+                            self.log(f"[summary] Consolidated Excel written to {out_path}")
+                        else:
+                            self.log(f"[error] Consolidated Excel missing at {out_path}")
+                    except Exception as e:
+                        self.log(f"[error] Consolidate summary Excel: {e}")
+
+                consolidate_csv(consolidated["csv"], base_root + ".csv")
+                consolidate_json(consolidated["json"], base_root + ".json")
+                consolidate_kml_inline(
+                    consolidated["kml_points"], base_root + "_points.kml", "Consolidated Points"
+                )
+                consolidate_kml_inline(
+                    consolidated["kml_routes"], base_root + "_routes.kml", "Consolidated Routes"
+                )
+                consolidate_kml_inline(
+                    consolidated["kml_routes3d"], base_root + "_routes3d.kml", "Consolidated Routes 3D"
+                )
+                consolidate_kml_inline(
+                    consolidated["kml_heatmap"], base_root + "_airport_heatmap.kml", "Consolidated Airport Heatmap"
+                )
+                consolidate_summary_zip(consolidated["summary"], base_root + "_summary.zip")
+                consolidate_summary_excel_from_json(consolidated["json"], base_root + "_summary.xlsx")
+                # Cleanup temporary per-aircraft outputs
+                if temp_consolidate_dir and os.path.isdir(temp_consolidate_dir):
+                    try:
+                        shutil.rmtree(temp_consolidate_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+
+            # consolidated summary CSV
+            try:
+                os.makedirs(self.out_dir, exist_ok=True)
+                summary_csv = os.path.join(self.out_dir, "batch_hits.csv")
+                with open(summary_csv, "w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    w.writerow(
+        ["icao_hex", "tail", "start_date", "end_date", "legs", "points"]
+                    )
+                    for s in stats_list:
+                        has_result = (s.get("points") or 0) > 0 or (s.get("legs") or 0) > 0
+                        w.writerow(
+                            [
+                                s.get("hex"),
+                                s.get("tail"),
+                                self.start_date.isoformat(),
+                                self.end_date.isoformat(),
+                                s.get("legs") if has_result else 0,
+                                s.get("points") if has_result else 0,
+                            ]
+                        )
+                self.log(f"[batch] Wrote {summary_csv}")
+            except Exception as e:
+                self.log(f"[error] batch summary: {e}")
+
+            self.progress_percent.emit(100)
+            self.status_update.emit("Complete")
+            self.finished_ok.emit()
+        except Exception as e:
+            self.progress.emit(f"[fatal] {e}")
+            self.status_update.emit("Stopped")
+            self.finished_err.emit(str(e))
 
 
 if __name__ == "__main__":
