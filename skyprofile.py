@@ -84,6 +84,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.styles import Alignment
 from openpyxl.drawing.image import Image as XLImage
 
+SKYPROFILE_VERSION = "1.0"
+
 try:
     import pycountry  # optional, for nicer country names
 except ImportError:
@@ -248,13 +250,50 @@ def resource_path(rel_path: str) -> str:
     """
     Resolve a relative resource path that works both from source and PyInstaller onefile.
     """
-    base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
-    candidate = os.path.join(base_path, rel_path)
-    if os.path.exists(candidate):
-        return candidate
-    # Fallback to resources/ subfolder
-    alt = os.path.join(base_path, "resources", os.path.basename(rel_path))
-    return alt
+    bases = [
+        getattr(sys, "_MEIPASS", None),
+        os.path.abspath("."),
+        os.path.dirname(getattr(sys, "executable", "") or ""),
+    ]
+    bases = [b for b in bases if b]
+    for base in bases:
+        candidate = os.path.join(base, rel_path)
+        if os.path.exists(candidate):
+            return candidate
+        # Fallback to resources/ subfolder
+        alt = os.path.join(base, "resources", os.path.basename(rel_path))
+        if os.path.exists(alt):
+            return alt
+    return rel_path
+
+
+def _parse_version_string(v: str) -> Tuple[int, ...]:
+    """
+    Parse a semantic-ish version string (e.g., '1.2.3' or 'v1.2') into a tuple of ints for comparison.
+    Non-numeric parts are ignored.
+    """
+    if not v:
+        return tuple()
+    v = v.strip()
+    if v.lower().startswith("v"):
+        v = v[1:]
+    parts: List[int] = []
+    for token in v.split("."):
+        if not token:
+            continue
+        try:
+            parts.append(int(token))
+        except ValueError:
+            digits = "".join(ch for ch in token if ch.isdigit())
+            try:
+                parts.append(int(digits) if digits else 0)
+            except Exception:
+                parts.append(0)
+    return tuple(parts)
+
+
+def _is_newer_version(candidate: str, current: str = SKYPROFILE_VERSION) -> bool:
+    return _parse_version_string(candidate) > _parse_version_string(current)
 
 
 def parse_batch_targets(csv_path: str) -> List[Dict[str, str]]:
@@ -3519,6 +3558,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     app.setWindowIcon(ico)
         except Exception:
             pass
+        menubar = self.menuBar()
+        settings_menu = menubar.addMenu("Settings")
+        act_update = QtWidgets.QAction("Check for Updates", self)
+        act_update.triggered.connect(self.check_for_updates)
+        settings_menu.addAction(act_update)
+        act_about = QtWidgets.QAction("About", self)
+        act_about.triggered.connect(self.show_about_dialog)
+        settings_menu.addAction(act_about)
         self.resize(int(1100 * 1.2), 700)
 
         self.worker: Optional[Worker] = None
@@ -4194,6 +4241,58 @@ class MainWindow(QtWidgets.QMainWindow):
         msg_box.setIcon(QtWidgets.QMessageBox.Critical)
         msg_box.addButton(QtWidgets.QMessageBox.Ok)
         msg_box.exec_()
+
+    def check_for_updates(self):
+        url = "https://api.github.com/repos/AlsatianConsulting/SkyProfile/tags"
+        headers = {"User-Agent": f"SkyProfile/{SKYPROFILE_VERSION}"}
+        msg = ""
+        try:
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+            resp = requests.get(url, headers=headers, timeout=6)
+            resp.raise_for_status()
+            data = resp.json()
+            tags = [item.get("name") for item in data if isinstance(item, dict) and item.get("name")]
+            newer = sorted(
+                [t for t in tags if _is_newer_version(t, SKYPROFILE_VERSION)],
+                key=_parse_version_string,
+                reverse=True,
+            )
+            if newer:
+                msg = f"Newer version available: {newer[0]} (current {SKYPROFILE_VERSION})."
+            else:
+                msg = f"You are on the latest version ({SKYPROFILE_VERSION})."
+        except Exception as e:
+            msg = f"Update check failed: {e}"
+        finally:
+            try:
+                QtWidgets.QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+        QtWidgets.QMessageBox.information(self, "Check for Updates", msg)
+
+    def show_about_dialog(self):
+        text = (
+            f"<b>SkyProfile</b><br/>"
+            f"Version {SKYPROFILE_VERSION}<br/>"
+            f'<a href=\"https://github.com/AlsatianConsulting/SkyProfile\">Project GitHub</a><br/>'
+            f"&copy; 2026 Alsatian Consulting, LLC.<br/><br/>"
+            f"<b>Data sources</b><br/>"
+            f"ADSBexchange globe history & basic-ac-db (per their terms)<br/>"
+            f"OpenSky Network contributors<br/>"
+            f"Planespotters.net & photographers<br/>"
+            f"FAA Registry (public data)<br/>"
+            f"OurAirports contributors (CC0/Public Domain)<br/>"
+        )
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("About SkyProfile")
+        box.setTextFormat(QtCore.Qt.RichText)
+        box.setText(text)
+        try:
+            box.setTextInteractionFlags(QtCore.Qt.TextBrowserInteraction)
+        except Exception:
+            pass
+        box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        box.exec_()
 
 
 def main():
